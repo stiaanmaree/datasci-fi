@@ -1,0 +1,114 @@
+---
+title: "lesson3-exercise3"
+author: "Stiaan Maree (MRXSTI001)"
+date: "21 August 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Lesson 3: Exercise 3
+
+## Brief
+
+Think of your own scraping example - a website you think contains useful or interesting information - and put together your own tutorial like one of those above.
+
+## Solution
+
+Get a list of the population of all countries from Wikipedia, this will involve firstly in getting a list of all countries, and secondly getting the population information for each country from that country's Wikipedia page.
+
+### Step 0: Load libraries
+
+```{r }
+library(rvest)
+library(tidyverse)
+library(stringr)
+```
+
+### Step 1: Get a list of all countries:
+
+```{r }
+countries_page <- read_html("https://en.wikipedia.org/wiki/List_of_sovereign_states")
+countries_page
+```
+
+### Step 2: Create iteration table
+
+Create a table that contains three columns:
+
+* The country name (title)
+
+* The Wikipedia link to the country (href)
+
+* A placeholder for the population
+
+```{r }
+countries_table <- data.frame(country = countries_page %>% html_nodes("table") %>% .[[1]] %>%  html_nodes("b a") %>% html_attr("title"),link = countries_page %>% html_nodes("table") %>% .[[1]] %>%  html_nodes("b a") %>% html_attr("href"),population = 'Unknown')
+countries_table$population <- as.character(countries_table$population)
+head(countries_table[,])
+
+## To see all countries, uncomment:
+#head(countries_table[,])
+```
+
+### Step 3: Iterate through countries, get and clean population field
+
+For all countries, on the Wikipedia page, the column on the right contains population information.  It has a heading called "Population", beneath it the word "Total", and next to "Total", the population information.  When we convert this html text to a list, we know that the population information is two places below the word "Population" (because we skip the word "Total").  Thus when we iterate through the column on the right, we set the index of the list to 2 positions beyond the index of the word "Population".  
+
+Now that we have the population information, we have to clean it of the following:
+
+* Square brackets and text inbetween: []
+
+* Round brackets and text inbetween: ()
+
+* White space
+
+_Note:_
+
+Currently, the notebook is set to only run for the first six countries, but if you want to run this notebook for all countries just change the *number_of_countries* to *nrow(countries_table)*. Then it runs for a couple of minutes.
+
+```{r }
+number_of_countries = 6
+
+## To see all countries, uncomment:
+#number_of_countries = nrow(countries_table)
+
+for (i in 1:number_of_countries)
+    {
+    country_name = paste("https://en.wikipedia.org", countries_table[i,2], sep="")
+    country_page <- read_html(country_name)
+    country_elements <- html_nodes(x = country_page, css = "th , .mergedrow td")
+    country_text <- html_text(country_elements, trim = TRUE) 
+    country_list <- as.list(country_text)
+    pop_idx <- 1
+
+    for (j in 1: length(country_list))
+    {
+        if (country_list[j] == 'Population')
+            {
+            pop_idx <- j + 2
+            break
+        }
+    }
+    
+    dirty_string <- country_list[pop_idx]
+    str_no_sq_br <- str_replace_all(dirty_string, "\\[(.+)\\]","")
+    str_no_ro_br <- str_replace_all(str_no_sq_br, "\\((.+)\\)","")
+    clean_string <- str_replace_all(str_no_ro_br, "\\s","")
+
+    countries_table[i,3] <- clean_string
+}
+
+```
+
+### Step 4: View the result
+
+```{r }
+head(countries_table[,c(1,3)])
+
+## To see all countries, uncomment:
+#print(countries_table[,c(1,3)])
+
+```
