@@ -2,7 +2,7 @@
 title: "Lesson 9 // R Packages"
 author: ""
 date: ""
-output: github_document
+output: html_document
 ---
 
 ```{r setup, include=FALSE}
@@ -318,6 +318,8 @@ You should then see output in the RStudio build pane as shown below:
 ```{r, eval = TRUE, echo = FALSE}
 knitr::include_graphics("figures/lesson9/datasci_testing.png")
 ```
+
+Note that all of the code, documentation and test examples outlined here can be found within the [`datasci` package](docs/lesson9-material/packages/datasci).
 
 ## Sharing & Collaboration
 
