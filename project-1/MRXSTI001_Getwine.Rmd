@@ -1,0 +1,596 @@
+---
+title: "Getwine Recommender System"
+author: "Stiaan Maree (MRXSTI001)"
+date: "05 September 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r echo=FALSE}
+knitr::include_graphics('getwine-logo.png')
+```
+
+```{r echo=FALSE}
+library(tidyverse)
+library(stringr)
+library(Matrix)
+library(NNLM)
+
+set.seed(123)
+```
+
+# The Problem
+
+Getwine is a South African wine portal where you can buy a range of South African wines for delivery.  It is of great marketing importance to Getwine to recommend the correct wine to the correct customer.  The main aim of this project is to develop such a recommender system based on one month's worth of sales data.  The idea is that the system will recommend the correct wine to purchase per user, based on their past purchases. As wine is bought in cases of 6 each, we will make 12 recommendations per user.
+
+# Approach
+
+A big difference exist between creating recommender systems for products like wine and products like movies.  Movies are normally watched once or twice, but if a person likes a wine, it means they will buy it again and again.  This means that a previously bought wine can indeed be recommended for a customer.
+
+The approach undertaken started out with the cleaning of the data, followed by an exploratory data analysis to understand the data better, and finally developing the recommender system.  
+
+Two different approaches will be developed for the recommender system, firstly a user-based collaborative filtering system, and secondly a recommender system based on matrix factorization.
+
+The data for the project is very sparse, two methods will be tested for the matrix factorization, with the last one specifically aimed at sparse data.
+
+The first step however is to load and clean the data.
+
+# Load and Clean Data
+
+The data consists of two files, one for the orders, and one for the items associated with each order.
+
+```{r }
+orders <- read.csv("orders.csv")
+order.items <- read.csv("order-items.csv")
+
+orders$customers_dob <- as.Date(orders$customers_dob)
+orders$date_purchased <- as.Date(orders$date_purchased)
+```
+
+Amongst the orders, the data contains data points that are not meant for analysis, for example head of operations, Johan Wegner, organises discount for some customers.
+
+The approach taken is that if any of the items in the order contains a product that is not valid, the whole order is considered void.  The reason for this is that customer behaviour might be different if discount is applied.  The aim of the exercise is to recommend wines for normal buying behaviour.
+
+```{r }
+orders.remove.01 <- order.items %>% filter(str_detect(products_name, "Johan")) %>% select(orders_id) %>% unlist 
+orders.remove.02 <- order.items %>% filter(str_detect(products_name, "Discount")) %>% select(orders_id) %>% unlist 
+orders.remove.03 <- order.items %>% filter(str_detect(products_name, "Mix")) %>% select(orders_id) %>% unlist 
+orders.remove.04 <- order.items %>% filter(str_detect(products_name, "Budget")) %>% select(orders_id) %>% unlist 
+orders.remove.05 <- order.items %>% filter(str_detect(products_name, "Assorted")) %>% select(orders_id) %>% unlist 
+orders.remove.06 <- order.items %>% filter(str_detect(products_name, "GETWINE")) %>% select(orders_id) %>% unlist 
+orders.remove.07 <- order.items %>% filter(str_detect(products_name, "Gift")) %>% select(orders_id) %>% unlist 
+orders.remove.08 <- order.items %>% filter(str_detect(products_name, "Personalised")) %>% select(orders_id) %>% unlist 
+orders.remove.09 <- order.items %>% filter(str_detect(products_name, "Pizza")) %>% select(orders_id) %>% unlist 
+orders.remove.10 <- order.items %>% filter(str_detect(products_name, "Refund")) %>% select(orders_id) %>% unlist 
+orders.remove.11 <- order.items %>% filter(str_detect(products_name, "Repairs")) %>% select(orders_id) %>% unlist 
+orders.remove.12 <- order.items %>% filter(str_detect(products_name, "kis")) %>% select(orders_id) %>% unlist 
+orders.remove.13 <- order.items %>% filter(str_detect(products_name, "TOP")) %>% select(orders_id) %>% unlist 
+```
+
+Orders where a product has a value of zero or less are also entirely ignored.
+
+```{r }
+# Remove order with 0.00 or smaller order_total
+orders.zero <- orders[orders$order_total <= 0,]$orders_id
+# Remove items with 0.00 or smaller products_price
+order.items.zero <- order.items[order.items$products_price <= 0,]$orders_id
+
+orders.to.remove <- unique(c(orders.zero, order.items.zero, orders.remove.01, orders.remove.02,orders.remove.03,orders.remove.04, orders.remove.05, orders.remove.06, orders.remove.07, orders.remove.08, orders.remove.09, orders.remove.10, orders.remove.11, orders.remove.12, orders.remove.13))
+
+orders.clean <- subset(orders, !(orders$orders_id %in% orders.to.remove))
+order.items.clean <- subset(order.items, !(order.items$orders_id %in% orders.to.remove))
+order.items.clean <- droplevels(order.items.clean)
+```
+
+# Exploratory data analysis
+
+We expect to see the same amount of unique order ids in the orders file and in the order items file:
+
+```{r }
+length(unique(orders.clean$orders_id))
+length(unique(order.items.clean$orders_id))
+```
+
+We also have a look at the number of customers and number of products available in the data: 
+
+```{r }
+# Number of Customers
+length(unique(orders.clean$customers_id))
+# Number of Products
+length(unique(order.items.clean$products_name))
+```
+
+Next, we inspect the number of orders per day.  It looks like a cyclical pattern can be identified, with two big spikes.
+
+```{r }
+# Orders per day 
+gb.count.date <- orders.clean %>% group_by(date_purchased)
+count.per.day <- gb.count.date %>% summarize(count = n())
+plot(count.per.day, type="l")
+```
+
+We would like to have a feel for the distribution of the age of customers.  It looks like Getwine sets the date of birth to the first of January of customers for whom they don't know.  So we will leave out all dates which falls on the first of January.  The bulk of customers are between 40 and 55 years old.
+
+```{r }
+# Age of customers (Take out -01-01)
+birthdates <- unique(orders.clean[str_sub(orders.clean$customers_dob,5,10) != "-01-01",c("customers_id", "customers_dob")])$customers_dob
+hist(floor(as.numeric(difftime(Sys.Date(), birthdates,unit="weeks"))/52.25), xlab = "Age", main = "Histogram of ages")
+```
+
+We would like to find out buying behaviour around the birthday of the customer.  If we see a trend of buying before the birthday, an "It's almost your birthday - get wine!" campaign can be launched.  If we see a trend of buying after the birthday, a gift card campaign can be launched.  We don't really see either of these scenarios.
+
+```{r }
+# Orders before / after birthday
+birthdays <- as.Date(paste("2017",str_sub(orders.clean[str_sub(orders.clean$customers_dob,5,10) != "-01-01",]$customers_dob,5,10), sep = ""))
+hist(floor(as.numeric(difftime(Sys.Date(), birthdays,unit="days"))), xlab = "Number of days from birthday", main = "Histogram of birthday behaviour")
+```
+
+We have had a look at some of the features of the data, but for the recommender systems, we will only use three features: the id of the customer and the name of the wine they bought and the fact whether the customer bought the wine or not.  We will not use the amount of bottles bought, as the aim of the recommender system is not to suggest 12 or 24 bottles of some wine, but rather to just suggest a specific wine to a specific customer.
+
+# Prepare Data: Group, Join, Indices, Train/Test, Matrix
+
+We must join the two cleaned data sets on the common orders_id field.  We also drop the amount bought, and replace it with a 1, where 0 would later represent not bought.
+
+```{r }
+# Join & Group Data
+data <- inner_join(orders.clean, order.items.clean, by="orders_id")
+data_sparse <- data[,c(1,9,11)]
+
+data_sparse_group <- data_sparse %>% group_by(customers_id, products_name)
+data_sparse_group_sum <- data_sparse_group %>% summarize(bought = 1)
+head(data_sparse_group_sum)
+```
+
+Next, we need to created indices for the customer id and the wine name.  We will work with packages which require this.
+
+```{r }
+# Create indexes
+
+# Number of Customers
+num.cust <- length(unique(data_sparse_group_sum$customers_id))
+customer_ix <- data.frame(cix = c(1:num.cust), customers_id = unique(data_sparse_group_sum$customers_id))
+head(customer_ix)
+
+# Number of Items
+num.prod <- length(unique(data_sparse_group_sum$products_name))
+product_ix <- data.frame(pix = c(1:num.prod), products_name = unique(data_sparse_group_sum$products_name))
+head(product_ix)
+
+# Add Indexes
+data_sparse_group_sum_cix <- inner_join(x = data_sparse_group_sum, y = customer_ix)
+data_sparse_group_sum_cix_pix <- inner_join(x = data_sparse_group_sum_cix, y= product_ix)
+head(data_sparse_group_sum_cix_pix)
+```
+
+We create training and test data sets, as we want to test our recommendation systems against data not seen by the method.  To leave out 5%, we can't just leave out random rows, as some of the customers only have one line of data in the data.  Instead, we rank the customers for the ones who bought the most to the least.  We then randomly leave out one wine for each of the top customers.  This way, we are certain that we do not leave out one customer entirely.
+
+```{r }
+# Train / Test
+
+# Group by most orders
+gb.count.customer <- data_sparse_group_sum_cix_pix %>% group_by(cix)
+order.per.customer <- gb.count.customer %>% summarize(count = n())  %>% arrange(desc(count))
+print(order.per.customer)
+
+# Leave out 5%
+data_sparse_group_sum_cix_pix_test <- data_sparse_group_sum_cix_pix %>% filter(cix %in% unlist(as.list(order.per.customer[1:40,1]))) %>% sample_n(1)
+data_sparse_group_sum_cix_pix_train <- anti_join(data_sparse_group_sum_cix_pix, data_sparse_group_sum_cix_pix_test)
+```
+
+Finally, we create a matrix as required by both the user-based and matrix factorization systems.
+
+```{r }
+# Create Matrix
+wine_sparse_matrix <- sparseMatrix(i = data_sparse_group_sum_cix_pix_train$pix,
+                         j = data_sparse_group_sum_cix_pix_train$cix,
+                         x = data_sparse_group_sum_cix_pix_train$bought)
+
+wine_matrix <- as.matrix(wine_sparse_matrix)
+```
+
+# Results & Validation: Recommender System
+
+### User-based collaborative filtering
+
+We start off with user-based collaborative filtering, which recommends similar products to similar users.  The similarity between users are calculated according to the cosine similarity.
+
+```{r }
+wine_matrix_user <- t(wine_matrix)
+colnames(wine_matrix_user) <- product_ix$products_name
+rownames(wine_matrix_user) <- customer_ix$customers_id
+
+# Cosine similarity
+cosine_sim <- function(a,b){crossprod(a,b)/sqrt(crossprod(a)*crossprod(b))}
+
+user_similarities = matrix(0, nrow = nrow(wine_matrix_user), ncol = nrow(wine_matrix_user))
+for(i in 1:(nrow(wine_matrix_user) - 1)){
+  for(j in (i+1):(nrow(wine_matrix_user))){
+    user_similarities[i,j] <- cosine_sim(wine_matrix_user[i,], wine_matrix_user[j,])
+  }
+}
+user_similarities <- user_similarities + t(user_similarities)
+diag(user_similarities) <- 0
+row.names(user_similarities) <- row.names(wine_matrix_user)
+colnames(user_similarities) <- row.names(wine_matrix_user)
+
+```
+
+Now that we have the matrix of user similarities, we need to create a function that will work out the recommendation for one user.  In this function we do not leave out previously bought wine, as we can indeed recommend it again to the user.
+
+```{r }
+
+# Work Out rating for a user
+user_based_recommendations <- function(user, user_similarities, wine_matrix_user){
+  
+  # Turn into character if not already
+  user <- ifelse(is.character(user),user,as.character(user))
+  
+  # Get scores
+  user_scores <- data.frame(wine = colnames(wine_matrix_user), 
+                            score = as.vector(user_similarities[user,] %*% wine_matrix_user), bought = wine_matrix_user[user,])
+  
+  # Sort - do not exclude bought wine
+  user_recom <- user_scores %>% arrange(desc(score))  
+
+  return(user_recom)
+  
+}
+
+```
+
+The following code gets the top 12 recommendations per user.  These include previously bought wine.
+
+```{r }
+
+user_recom <-  NULL
+
+for (i in 1:nrow(customer_ix))
+{
+  
+  data <- data.frame(user = customer_ix[i,]$customers_id, user_based_recommendations(user = customer_ix[i,]$customers_id, user_similarities = user_similarities, wine_matrix_user = wine_matrix_user))
+  data_top_12 <- data.frame(data[c(1:12), c(1:3)],type="new")
+  user_recom <- rbind(user_recom, data_top_12)
+}
+
+```
+
+Now that we have recommendations for each user, we do validation on the model by checking how many of the recommendations fall into the training data, how many in the testing data and how many new ones.  
+
+```{r }
+levels(user_recom$type) <- c("train","test","new")
+
+for (i in 1:nrow(user_recom))
+{
+  train_match <- nrow(data_sparse_group_sum_cix_pix_train[data_sparse_group_sum_cix_pix_train$customers_id == user_recom[i,1] & data_sparse_group_sum_cix_pix_train$products_name == user_recom[i,2],])
+  test_match <- nrow(data_sparse_group_sum_cix_pix_test[data_sparse_group_sum_cix_pix_test$customers_id == user_recom[i,1] & data_sparse_group_sum_cix_pix_test$products_name == user_recom[i,2],])
+  
+  if (train_match > 0 )
+  {
+    user_recom[i,4] = "train"
+  }
+  else if (test_match > 0)
+  {
+    user_recom[i,4] = "test"
+  }
+  else
+  {
+    user_recom[i,4] = "new"
+  }
+}
+
+nrow(data_sparse_group_sum_cix_pix_train)
+nrow(user_recom)
+nrow(user_recom[user_recom$type == "train", ])
+nrow(user_recom[user_recom$type == "test", ])
+nrow(user_recom[user_recom$type == "new", ])
+
+head(user_recom)
+```
+
+There are `r nrow(user_recom)` recommendations in total.  We see that `r nrow(user_recom[user_recom$type == "train", ])` of the `r nrow(data_sparse_group_sum_cix_pix_train)` training points were picked up by the model.  Of the 40 test data points, the model suggested `r nrow(user_recom[user_recom$type == "test", ])`.  The other `r nrow(user_recom[user_recom$type == "new", ])` were all new suggestions.
+
+Lastly, we write the recommendations out to a file, for ease of use by other systems.
+
+```{r }
+write.csv(user_recom, "user_recom.csv")
+```
+
+### Matrix Factorization
+
+For the matrix factorization, we develop a general recommender accuracy function based on the squared difference between the random initial values and the dataset points, which can take any size matrix, provided the x variable has the correct dimension size.  The result is two matrices; one each for the wines and one for the customers.  Matrix multiply these with each other, and we get one recommendation value for each customer for each wine.
+
+The model caters for a bias for each wine and for each user.  This can be thought of as some attribute relating to either the wine or the user, for instance, when a user have a high bias value, it might mean that they generally buy a lot of wine.
+
+The model also does L2 regularization, which helps keeps parameter values low by introducing a penalty for high values.
+
+```{r }
+recommender_accuracy_general <- function(x, observed_ratings,  lambda = 3e-3){
+  
+  nr_x <- ncol(observed_ratings) 
+  nr_y <- nrow(observed_ratings) 
+  
+  nr_fact <- (length(x) / (nr_x + nr_y)) - 1 
+
+  y_factors <- matrix(x[1:(nr_y * nr_fact)],nr_y,nr_fact)
+  x_factors <- matrix(x[((nr_y * nr_fact) + 1):((nr_x + nr_y) * nr_fact)],nr_fact,nr_x)
+
+  # the bias vectors are repeated to make the later matrix calculations easier 
+  y_bias <- matrix(x[(((nr_x + nr_y) * nr_fact) + 1):(((nr_x + nr_y) * nr_fact) + nr_y)],nrow=nr_y,ncol=nr_x)
+  x_bias <- t(matrix(x[(((nr_x + nr_y) * nr_fact) + nr_y + 1):((nr_x + nr_y) * (nr_fact + 1))],nrow=nr_x,ncol=nr_y))
+  
+  # get predictions from dot products + bias terms
+  predicted_ratings <- y_factors %*% x_factors + y_bias + x_bias
+  
+  errors <- (observed_ratings - predicted_ratings)^2 
+  
+  # L2 norm penalizes large parameter values (note not applied to bias terms)
+  penalty <- sum(sqrt(apply(y_factors^2,1,sum))) + sum(sqrt(apply(x_factors^2,2,sum)))
+  
+  # model accuracy contains an error term and a weighted penalty 
+  accuracy <- sqrt(mean(errors[!is.na(observed_ratings)])) + lambda * penalty
+  
+  return(accuracy)
+}
+
+```
+
+We will now optimize the recommender_accuracy_general function with the wine data.  We work out the correct dimensions for the matrix to be optimised.
+
+For the maximum of the uniform distribution to deliver the maximum of the range (1), the following equation needs to be solved: $5x^2 + 2x = 1$.  We see that $x = 0.2898979$.
+
+```{r }
+nr_x <- ncol(wine_matrix)
+nr_y <- nrow(wine_matrix)
+nr_fact <- 5
+nr_random <- (nr_fact + 1) * (nr_x + nr_y)
+
+# Optimization step
+# This runs for 1 hour, so we load the rec1 object from the proj1_rec1.RData file, but the following code can create the rec1 object.
+
+#rec1 <- optim(par=runif(nr_random, min=0, max=0.2898979), recommender_accuracy_general, 
+#              observed_ratings = wine_matrix, control=list(maxit=100000))
+
+load(file="proj1_rec1.RData")
+
+rec1$convergence
+rec1$value
+```
+
+Now that we have the optimised values for both our wine and user matrices, we can work out a recommendation score for each customer for each wine.  We also check the RMSE, however, validation is rather done against the test set in the next step.
+
+```{r }
+# extract optimal user and movie factors and bias terms
+y_factors <- matrix(rec1$par[1:(nr_y * nr_fact)],nr_y,nr_fact)
+x_factors <- matrix(rec1$par[((nr_y * nr_fact) + 1):((nr_x + nr_y) * nr_fact)],nr_fact,nr_x)
+
+y_bias <- matrix(rec1$par[(((nr_x + nr_y) * nr_fact) + 1):(((nr_x + nr_y) * nr_fact) + nr_y)],nrow=nr_y,ncol=nr_x)
+x_bias <- t(matrix(rec1$par[(((nr_x + nr_y) * nr_fact) + nr_y + 1):((nr_x + nr_y) * (nr_fact + 1))],nrow=nr_x,ncol=nr_y))
+
+# get predicted ratings
+predicted_ratings <- y_factors %*% x_factors + y_bias + x_bias
+
+# check accuracy
+errors <- (wine_matrix - predicted_ratings)^2 
+sqrt(mean(errors[!is.na(wine_matrix)]))
+
+```
+
+As with the user based system, we get the top 12 recommendations per user, and inspect whether they are part of the training data, the test data or new recommendations.  
+
+```{r }
+# Get top 12 recommendations per user
+
+rownames(predicted_ratings) <- c(1:283)
+colnames(predicted_ratings) <- c(1:791)
+
+in.train <- 0
+in.test <- 0
+in.new <- 0
+
+for (i in 1:791)
+{
+  j = 1
+  k = 1
+  wine_rating_name_combo <- data.frame(name = rownames(predicted_ratings), rating = predicted_ratings[,i]) %>% arrange(desc(rating))
+  
+  while(k <= 12)
+  {
+    train_match <- nrow(data_sparse_group_sum_cix_pix_train[data_sparse_group_sum_cix_pix_train$cix == colnames(predicted_ratings)[i] & data_sparse_group_sum_cix_pix_train$pix == wine_rating_name_combo[k,]$name,])
+    test_match <- nrow(data_sparse_group_sum_cix_pix_test[data_sparse_group_sum_cix_pix_test$cix == colnames(predicted_ratings)[i] & data_sparse_group_sum_cix_pix_test$pix == wine_rating_name_combo[k,]$name,])
+      
+    # In Training Data
+    if (train_match > 0)
+    {
+      in.train <- in.train + 1
+    }
+    
+    # In Test Data
+    else if (test_match > 0)
+    {
+      in.test <- in.test +1
+    }
+      
+    # Other Recommendation
+    else
+    {
+      in.new <- in.new + 1
+      j = j + 1
+    }
+      
+    k = k + 1
+    
+  }
+  
+}
+
+in.train
+in.test 
+in.new 
+```
+
+As can be seen in the results, the model did not fare well to pick up data in the training and test set, as most of the recommendations are new.
+This result compels us to try another method for optimising the two matrices.
+
+### NNLM
+
+We will use the NNLM package, which specifically caters for sparse data, like the kind we are dealing with here.  Again, we work out the predictions and RMSE, but leave the validation for the next step.
+
+```{r }
+k <- 5;
+init <- list(W = matrix(runif(nrow(wine_matrix)*k), ncol = k),
+             H = matrix(runif(ncol(wine_matrix)*k), nrow = k));
+scd.mse  <- nnmf(wine_matrix, k, init = init, max.iter = 1000000, alpha = 3e-3, beta = 3e-3);
+
+#scd.mse$W
+#scd.mse$H
+
+# get predicted ratings
+predicted_ratings.nnlm <- scd.mse$W %*% scd.mse$H
+
+rownames(predicted_ratings.nnlm) <- c(1:283)
+colnames(predicted_ratings.nnlm) <- c(1:791)
+
+# check accuracy
+errors.nnlm <- (wine_matrix - predicted_ratings.nnlm)^2 
+sqrt(mean(errors.nnlm[!is.na(wine_matrix)]))
+```
+
+We get the top 12 predictions according to the NNLM model for each user.  We also have a look at whether the recommendations fall into the training, test or new categories.  We also populate an object with all the recommendations and their scores, and write that out to file.
+
+```{r }
+# NNLM: Get top 12 recommendations per user
+
+rownames(predicted_ratings.nnlm) <- c(1:283)
+colnames(predicted_ratings.nnlm) <- c(1:791)
+
+in.train.nnlm <- 0
+in.test.nnlm <- 0
+in.new.nnlm <- 0
+
+recom <- NULL
+
+for (i in 1:791)
+{
+  
+  j = 1
+  k = 1
+  wine_rating_name_combo <- data.frame(name = rownames(predicted_ratings.nnlm), rating = predicted_ratings.nnlm[,i]) %>% arrange(desc(rating))
+  
+  while(k <= 12)
+  {
+    
+    train_match <- nrow(data_sparse_group_sum_cix_pix_train[data_sparse_group_sum_cix_pix_train$cix == colnames(predicted_ratings.nnlm)[i] & data_sparse_group_sum_cix_pix_train$pix == wine_rating_name_combo[k,]$name,])
+    test_match <- nrow(data_sparse_group_sum_cix_pix_test[data_sparse_group_sum_cix_pix_test$cix == colnames(predicted_ratings.nnlm)[i] & data_sparse_group_sum_cix_pix_test$pix == wine_rating_name_combo[k,]$name,])
+
+    current_customer <- customer_ix[customer_ix$cix == colnames(predicted_ratings.nnlm)[i],]$customers_id
+    current_wine <- product_ix[product_ix$pix == wine_rating_name_combo[k,]$name, ]$products_name
+    rating <- wine_rating_name_combo[k,]$rating
+    type = "new"
+    
+    # In Training Data
+    if (train_match > 0)
+    {
+      in.train.nnlm <- in.train.nnlm + 1
+      type = "train"
+    }
+    
+    # In Test Data
+    else if (test_match > 0)
+    {
+      in.test.nnlm <- in.test.nnlm +1
+      type = "test"
+    }
+    
+    # Other Recommendation
+    else
+    {
+      in.new.nnlm <- in.new.nnlm + 1
+      j = j + 1
+    }
+    
+    k = k + 1
+    recom <- rbind(recom, data.frame(current_customer, current_wine, type, rating = round(rating,2)))
+
+  }
+  
+}
+
+#in.train.nnlm
+#in.test.nnlm
+#in.new.nnlm
+
+write.csv(user_recom, "matrix_recom.csv")
+
+nrow(recom)
+nrow(recom[recom$type == "train", ])
+nrow(recom[recom$type == "test", ])
+nrow(recom[recom$type == "new", ])
+```
+
+The results of the NNLM matrix factorization compared to the least squares optimization matrix factorization is much better.  
+
+Now we see that `r nrow(recom[recom$type == "train", ])` of the `r nrow(data_sparse_group_sum_cix_pix_train)` training points were picked up by the model.  Of the 40 test data points, the model suggested `r nrow(recom[recom$type == "test", ])`, which is an improvement on the first matrix factorization model.  The other `r nrow(recom[recom$type == "new", ])` were all new suggestions.
+
+# Comparison
+
+We can agree that the NNLM matrix factorization is better than the optimization matrix factorization model.  But how do we choose between the NNLM matrix factorization model and the user based model?
+
+When looking at the differences between the two models, we see that on average the recommendations match six bottles out of the 12 recommended ones per customer.
+
+```{r }
+comparison_per_user <- NULL
+
+for (i in 1:nrow(customer_ix))
+{
+    matrix_result <- recom[recom$current_customer == customer_ix[i,]$customers_id,]$current_wine
+    user_result <- user_recom[user_recom$user == customer_ix[i,]$customers_id,]$wine
+    match_len <- length(matrix_result[matrix_result %in% user_result])
+    comparison_per_user <- rbind(comparison_per_user, data.frame(user = customer_ix[i,]$customers_id, matches = match_len))
+}
+
+hist(as.integer(comparison_per_user$matches), xlab = "Matches", main = "Histogram of matches between models per user")
+mean(as.integer(comparison_per_user$matches))
+```
+
+In terms of the test data, the user based model performed better.  The user based model also placed more suggestions in the training model than the matrix model.  The matrix model is still useful, as the further inspection of optimised matrices might reveal patterns in terms of cultivar or year.
+
+We also inspect the top wines sold, and recommended by each of the methods.  Once again, the user based model outperforms the matrix factorization model.
+
+```{r }
+# Top selling wines
+gb.wine.sold <- data_sparse_group_sum_cix_pix %>% group_by(products_name)
+top.wine.sold <- gb.wine.sold %>% summarize(count = n()) %>% arrange(desc(count))
+head(top.wine.sold)
+
+# Top Recommended wines: matrix factorization model
+gb.matrix.wine <- recom %>% group_by(current_wine)
+top.matrix.wines <- gb.matrix.wine %>% summarize(count = n()) %>% arrange(desc(count))
+head(top.matrix.wines)
+
+# Top Recommended wines: user based model
+gb.user.wine <- user_recom %>% group_by(wine)
+top.user.wines <- gb.user.wine %>% summarize(count = n()) %>% arrange(desc(count))
+head(top.user.wines)
+
+```
+
+Based on results seen in the test data and top recommended wines, the final recommendation system chosen is the user-based collaborative filtering model.
+
+# Research Limitations
+
+The data used for this study only spans 30 days. Given more data for a longer period, the following two additional studies can be undertaken:
+
+* Investigate seasonal behaviour, and recommend according to the observed trends.
+
+* Investigate how users tastes evolve, and try to identify patterns, for example someone might start out as a Merlot drinker, then move on to Cabernet Sauvignon, and later on move to Shiraz.  Then recommend the right cultivar at the right time of progression.
+
+# References
+
+Getwine. (2017). *Buy Superb South African Wine* [online] Available at: http://www.getwine.co.za [Accessed 1 Sep. 2017].
+
+R Core Team (2017). *R: A language and environment for statistical
+  computing.* R Foundation for Statistical Computing, Vienna, Austria.
+  URL http://www.R-project.org/.
